@@ -163,6 +163,61 @@ else
   end
 end
 
+class TestLocalProcessProvider < SiteSettings::LocalProcessProvider
+  attr_accessor :current_site
+
+  def initialize
+    super
+    self.current_site = "test"
+  end
+end
+
+begin
+  ActiveRecord::Migration.check_pending!
+rescue ActiveRecord::PendingMigrationError
+  raise "There are pending migrations, run RAILS_ENV=test bin/rake db:migrate"
+end
+
+Sidekiq.error_handlers.clear
+
+# Ugly, but needed until we have a user creator
+begin
+  User.skip_callback(:create, :after, :ensure_in_trust_level_group)
+rescue ArgumentError
+  # Ignore.
+end
+
+class TestCurrentUserProvider < Auth::DefaultCurrentUserProvider
+  def log_on_user(user, session, cookies, opts = {})
+    session[:current_user_id] = user.id
+    super
+  end
+
+  def log_off_user(session, cookies)
+    session[:current_user_id] = nil
+    super
+  end
+end
+
+DiscoursePluginRegistry.reset! if ENV['LOAD_PLUGINS'] != "1"
+Discourse.current_user_provider = TestCurrentUserProvider
+
+SiteSetting.refresh!
+
+# Rebase defaults
+#
+# We nuke the DB storage provider from site settings, so need to yank out the existing settings
+#  and pretend they are default.
+# There are a bunch of settings that are seeded, they must be loaded as defaults
+SiteSetting.current.each do |k, v|
+  # skip setting defaults for settings that are in unloaded plugins
+  SiteSetting.defaults.set_regardless_of_locale(k, v) if SiteSetting.respond_to? k
+end
+
+SiteSetting.provider = TestLocalProcessProvider.new
+
+WebMock.disable_net_connect!
+
 RSpec.configure do |config|
   config.fail_fast = ENV['RSPEC_FAIL_FAST'] == "1"
   config.silence_filter_announcements = ENV['RSPEC_SILENCE_FILTER_ANNOUNCEMENTS'] == "1"
@@ -187,47 +242,6 @@ RSpec.configure do |config|
   # automatically. This will be the default behavior in future versions of
   # rspec-rails.
   config.infer_base_class_for_anonymous_controllers = true
-
-  config.before(:suite) do
-    begin
-      ActiveRecord::Migration.check_pending!
-    rescue ActiveRecord::PendingMigrationError
-      raise "There are pending migrations, run RAILS_ENV=test bin/rake db:migrate"
-    end
-
-    Sidekiq.error_handlers.clear
-
-    # Ugly, but needed until we have a user creator
-    User.skip_callback(:create, :after, :ensure_in_trust_level_group)
-
-    DiscoursePluginRegistry.reset! if ENV['LOAD_PLUGINS'] != "1"
-    Discourse.current_user_provider = TestCurrentUserProvider
-
-    SiteSetting.refresh!
-
-    # Rebase defaults
-    #
-    # We nuke the DB storage provider from site settings, so need to yank out the existing settings
-    #  and pretend they are default.
-    # There are a bunch of settings that are seeded, they must be loaded as defaults
-    SiteSetting.current.each do |k, v|
-      # skip setting defaults for settings that are in unloaded plugins
-      SiteSetting.defaults.set_regardless_of_locale(k, v) if SiteSetting.respond_to? k
-    end
-
-    SiteSetting.provider = TestLocalProcessProvider.new
-
-    WebMock.disable_net_connect!
-  end
-
-  class TestLocalProcessProvider < SiteSettings::LocalProcessProvider
-    attr_accessor :current_site
-
-    def initialize
-      super
-      self.current_site = "test"
-    end
-  end
 
   class DiscourseMockRedis < MockRedis
     def without_namespace
@@ -280,18 +294,6 @@ RSpec.configure do |config|
     Rails.configuration.multisite = false # rubocop:disable Discourse/NoDirectMultisiteManipulation
     RailsMultisite::ConnectionManagement.clear_settings!
     ActiveRecord::Base.establish_connection
-  end
-
-  class TestCurrentUserProvider < Auth::DefaultCurrentUserProvider
-    def log_on_user(user, session, cookies, opts = {})
-      session[:current_user_id] = user.id
-      super
-    end
-
-    def log_off_user(session, cookies)
-      session[:current_user_id] = nil
-      super
-    end
   end
 
   # Normally we `use_transactional_fixtures` to clear out a database after a test
